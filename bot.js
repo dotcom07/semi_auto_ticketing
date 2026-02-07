@@ -9,6 +9,11 @@ import os from 'os';
 import path from 'path';
 
 
+
+// 전역 변수로 설정 저장 (재시도 시 사용)
+let currentConfig = null;
+let uiPage = null;
+
 // ============================================================
 // 0. 크롬 자동 실행 함수 (배치 파일 대체)
 // ============================================================
@@ -59,8 +64,6 @@ async function launchChrome() {
     await new Promise(resolve => setTimeout(resolve, 2000));
 }
 
-let uiPage = null;
-
 // ============================================================
 // [핵심] 로그를 UI와 터미널 양쪽에 출력하는 함수
 // ============================================================
@@ -82,44 +85,86 @@ async function logToUI(message, type = 'info') {
     }
 }
 
+// UI에 에러 상태 알림 (재시도 버튼 활성화)
+async function activateRetryMode() {
+    if (uiPage && !uiPage.isClosed()) {
+        await uiPage.evaluate(() => {
+            if (window.showRetryButton) window.showRetryButton();
+        });
+    }
+}
+
 // ============================================================
 // 1. GUI 설정 윈도우 실행 함수 (스크립트 주입 방식 - 연결 확실함)
 // ============================================================
 async function launchGUI() {
     console.log('🖥️ 설정 UI 윈도우를 띄웁니다...');
     
+    // (중략: 기존 execPath 설정 및 uiBrowser 실행 로직)
     const platform = os.platform();
     let execPath = '';
-    if (platform === 'darwin') {
-        execPath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-    } else if (platform === 'win32') {
+    if (platform === 'win32') {
         execPath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+    } else if (platform === 'darwin') {
+        execPath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
     }
 
     const uiBrowser = await puppeteer.launch({
         headless: false,
         executablePath: execPath,
-        args: [
-            '--window-size=500,800', 
-            '--app=data:text/html,', 
-            '--no-first-run',
-            '--no-default-browser-check'
-        ] 
+        args: ['--window-size=500,850', '--app=data:text/html,'] 
     });
 
     const pages = await uiBrowser.pages();
     uiPage = pages[0];
-    await uiPage.setViewport({ width: 500, height: 800 });
+    await uiPage.setViewport({ width: 500, height: 850 });
 
-    // 1. Node.js 연결 함수 미리 정의
-    await uiPage.exposeFunction('startNodeLogic', (data) => {
-        uiResolve(data);
+    // --- [추가] 브라우저 로그인 상태 체크 함수 ---
+    await uiPage.exposeFunction('checkLoginStatus', async () => {
+        try {
+            // 실행 중인 디버그 크롬에 연결
+            const browser = await puppeteer.connect({ browserURL: 'http://127.0.0.1:9222',
+                defaultViewport: null
+            });
+            const pages = await browser.pages();
+            // 멜론 티켓 페이지 찾기
+            const targetPage = pages.find(p => p.url().includes('ticket.melon.com'));
+            
+            if (!targetPage) {
+                browser.disconnect();
+                return { loggedIn: false, msg: "멜론 페이지를 열어주세요" };
+            }
+
+            // 로그인 여부 확인 (#name_area에 '반갑습니다' 텍스트 존재 여부)
+            const loginInfo = await targetPage.evaluate(() => {
+                const nameArea = document.querySelector('#name_area');
+                if (nameArea && nameArea.innerText.includes('반갑습니다')) {
+                    return { isLoggedIn: true, text: nameArea.innerText };
+                }
+                return { isLoggedIn: false, text: "" };
+            });
+
+            browser.disconnect(); // 연결 해제 (메인 로직과 충돌 방지)
+            return { loggedIn: loginInfo.isLoggedIn, msg: loginInfo.text };
+        } catch (e) {
+            return { loggedIn: false, msg: "크롬 연결 대기 중..." };
+        }
     });
 
-    let uiResolve;
-    const logicPromise = new Promise((resolve) => { uiResolve = resolve; });
+    await uiPage.exposeFunction('startNodeLogic', (data) => {
+        currentConfig = data; // 설정 저장
+        runBotLogic(data);    // 로직 시작
+    });
 
-    // 2. HTML (스크립트 태그 없음 - 순수 디자인만)
+    await uiPage.exposeFunction('retryNodeLogic', () => {
+        if (currentConfig) {
+            logToUI('🔄 재시도 요청됨! 봇을 다시 시작합니다...', 'warn');
+            runBotLogic(currentConfig);
+        } else {
+            logToUI('❌ 저장된 설정이 없습니다. 처음부터 다시 시작해주세요.', 'error');
+        }
+    });
+
     const htmlContent = `
     <!DOCTYPE html>
     <html>
@@ -132,9 +177,20 @@ async function launchGUI() {
             .group { background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 15px; }
             label { display: block; margin-bottom: 5px; font-weight: bold; font-size: 14px; }
             input, select { width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
-            button { width: 100%; background-color: #00cd3c; color: white; padding: 15px; border: none; border-radius: 8px; font-size: 18px; font-weight: bold; cursor: pointer; transition: 0.3s; }
-            button:hover { background-color: #00b033; }
-            button:disabled { background-color: #ccc; cursor: not-allowed; }
+            
+            /* 버튼 스타일 수정 */
+            button { width: 100%; padding: 15px; border: none; border-radius: 8px; font-size: 18px; font-weight: bold; cursor: pointer; transition: 0.3s; margin-bottom: 10px; }
+            
+            #startBtn { background-color: #ccc; color: #666; cursor: not-allowed; } /* 기본 비활성 스타일 */
+            #startBtn.active { background-color: #00cd3c; color: white; cursor: pointer; } /* 활성 스타일 */
+            #startBtn.active:hover { background-color: #00b033; }
+            
+            #retryBtn { background-color: #ff4757; color: white; display: none; }
+            #retryBtn:hover { background-color: #ff6b81; }
+            
+            .login-status { text-align: center; font-size: 12px; margin-bottom: 10px; color: #666; }
+            .status-ok { color: #00cd3c; font-weight: bold; }
+
             #log-container {
                 background-color: #1e1e1e; color: #00ff00; padding: 15px; border-radius: 12px;
                 height: 300px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 12px;
@@ -151,6 +207,8 @@ async function launchGUI() {
         <h2>🍈 Ticket Bot Controller</h2>
         
         <div class="group">
+            <div id="loginStatusMsg" class="login-status">로그인 상태 확인 중...</div>
+
             <label>📅 목표 날짜</label>
             <div style="display:flex; gap:5px;">
                 <input type="number" id="year" value="2026" placeholder="년">
@@ -165,7 +223,8 @@ async function launchGUI() {
                 <option value="gemini">Google (Gemini)</option>
             </select>
             
-            <button id="startBtn">🚀 봇 가동 시작</button>
+            <button id="startBtn" disabled>🔒 로그인 필요</button>
+            <button id="retryBtn">🔄 오류 발생! 재시도 하기</button>
         </div>
 
         <label>📜 진행 로그</label>
@@ -176,13 +235,11 @@ async function launchGUI() {
     </html>
     `;
 
-    // 3. HTML 로드 (Base64 방식)
     const base64HTML = Buffer.from(htmlContent).toString('base64');
     await uiPage.goto(`data:text/html;base64,${base64HTML}`);
 
-    // 4. 자바스크립트 로직 별도 주입 (이 방식이 가장 안전함)
-    // 문자열로 정의하여 번들러(esbuild) 간섭을 피함
     const clientScript = `
+        // 로그 추가
         window.addLog = function(msg, type, time) {
             const container = document.getElementById('log-container');
             const div = document.createElement('div');
@@ -196,6 +253,48 @@ async function launchGUI() {
             container.scrollTop = container.scrollHeight;
         };
 
+        // 재시도 버튼 보이기
+        window.showRetryButton = function() {
+            document.getElementById('retryBtn').style.display = 'block';
+            document.getElementById('startBtn').style.display = 'none';
+        };
+
+        // UI 초기화
+        window.resetUI = function() {
+            document.getElementById('retryBtn').style.display = 'none';
+            document.getElementById('startBtn').style.display = 'block';
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('startBtn').innerText = '가동 중...';
+            document.getElementById('startBtn').classList.remove('active');
+        };
+
+        // --- [추가] 로그인 감시자 (1.5초마다 실행) ---
+        let isRunning = false;
+        setInterval(async () => {
+            if (isRunning) return; // 봇 가동 중엔 체크 안 함
+
+            const result = await window.checkLoginStatus();
+            const btn = document.getElementById('startBtn');
+            const statusMsg = document.getElementById('loginStatusMsg');
+
+            if (result.loggedIn) {
+                // 로그인 됨 -> 버튼 활성화
+                if (btn.disabled) {
+                    btn.disabled = false;
+                    btn.classList.add('active');
+                    btn.innerText = '🚀 봇 가동 시작';
+                    statusMsg.innerHTML = '<span class="status-ok">✅ ' + result.msg + '</span>';
+                }
+            } else {
+                // 로그인 안 됨 -> 버튼 비활성화
+                btn.disabled = true;
+                btn.classList.remove('active');
+                btn.innerText = '🔒 로그인 필요';
+                statusMsg.innerText = '⚠️ 멜론 티켓에 로그인해주세요.';
+            }
+        }, 1500);
+
+        // 시작 버튼 핸들러
         document.getElementById('startBtn').onclick = function() {
             const year = document.getElementById('year').value;
             const month = document.getElementById('month').value;
@@ -207,57 +306,59 @@ async function launchGUI() {
                 return;
             }
 
-            this.disabled = true;
-            this.innerText = '가동 중...';
-            const inputs = document.querySelectorAll('input, select');
-            for (let i = 0; i < inputs.length; i++) inputs[i].disabled = true;
+            isRunning = true; // 감시 중단
+            window.resetUI(); 
 
-            // 여기서 Node.js 함수 호출
-            if (window.startNodeLogic) {
-                window.startNodeLogic({ 
-                    targetYear: Number(year), 
-                    targetMonth: Number(month), 
-                    targetDay: Number(day), 
-                    OCR_PROVIDER: provider 
-                });
-            } else {
-                alert('연결 오류: Node.js 브릿지가 아직 준비되지 않았습니다.');
-            }
+            window.startNodeLogic({ 
+                targetYear: Number(year), 
+                targetMonth: Number(month), 
+                targetDay: Number(day), 
+                OCR_PROVIDER: provider 
+            });
+        };
+
+        document.getElementById('retryBtn').onclick = function() {
+            window.resetUI();
+            window.retryNodeLogic();
         };
     `;
 
-    // 스크립트를 브라우저에 강제 주입
     await uiPage.addScriptTag({ content: clientScript });
-
-    return logicPromise;
 }
 // ============================================================
 // 2. 메인 실행부
 // ============================================================
-(async () => {
 
-    await launchChrome();
-    // [UI 실행] 설정값을 받아옵니다.
-    const config = await launchGUI();
+async function runBotLogic(config) {
 
-    console.log('\n==========================================');
-    console.log(`✅ 설정 완료!`);
-    console.log(`📅 날짜: ${config.targetYear}년 ${config.targetMonth}월 ${config.targetDay}일`);
-    console.log(`🤖 모델: ${config.OCR_PROVIDER}`);
-    console.log('==========================================\n');
+    // await launchChrome();
+    // // [UI 실행] 설정값을 받아옵니다.
+    // const config = await launchGUI();
 
     // 받아온 설정값 변수 할당
     const { targetYear, targetMonth, targetDay, OCR_PROVIDER } = config;
-    console.log('🔄 Chrome 브라우저(포트 9222)에 연결 시도 중...');
-    
+
+
     let browser;
     try {
+
+        console.log('\n==========================================');
+        console.log(`✅ 설정 완료!`);
+        console.log(`📅 날짜: ${config.targetYear}년 ${config.targetMonth}월 ${config.targetDay}일`);
+        console.log(`🤖 모델: ${config.OCR_PROVIDER}`);
+        console.log('==========================================\n');
+
+
+        console.log('🔄 Chrome 브라우저(포트 9222)에 연결 시도 중...');
+    
+
         browser = await puppeteer.connect({
             browserURL: 'http://127.0.0.1:9222',
             defaultViewport: null // 기존 창 크기 사용
         });
     } catch (e) {
         await logToUI('❌ Chrome 연결 실패! 디버그 모드로 실행되었는지 확인하세요.', 'error');
+        await activateRetryMode();
         return;
     }
 
@@ -269,6 +370,7 @@ async function launchGUI() {
     if (!targetPage) {
         await logToUI('❌ 멜론 티켓 페이지를 찾을 수 없습니다.', 'error');
         browser.disconnect();
+        await activateRetryMode();
         return;
     }
 
@@ -693,7 +795,6 @@ async function launchGUI() {
 
                     if (hasError) {
                         await logToUI("❌ 캡차 오류: 문자를 정확히 입력해 주세요", "error");
-                        // 여기서 재시도 로직으로 이동
                     } else {
                         await logToUI("✅ 캡차 통과!", "success");
                         // 다음 단계 진행
@@ -707,13 +808,22 @@ async function launchGUI() {
 
             } catch (e) {
             await logToUI(`❌ 팝업 에러: ${e.message}`, 'error');
+            await activateRetryMode();
             }
 
         } else {
             await logToUI('❌ 버튼 좌표 계산 실패', 'error');
+            await activateRetryMode();
         }
     } catch (e) {
         await logToUI(`❌ 실행 중 에러: ${e.message}`, 'error');
+        await activateRetryMode();
     }
     console.log('✅ 봇 동작 완료.');
+}
+
+(async () => {
+    await launchChrome();
+    await launchGUI();
+    // launchGUI 내부에서 버튼 클릭 시 runBotLogic()이 호출됨
 })();
