@@ -311,7 +311,7 @@ import { ChatAnthropic } from "@langchain/anthropic";
             - The bottom horizontal bar counts ONLY if it is clearly connected to the vertical stroke.
             - If a horizontal line appears near the bottom but is not connected, crosses other characters, or looks like noise, it MUST be ignored.
             - In that case, classify the letter as F, not E.
-            
+
 
             - Do NOT infer characters from noise.
             - Do NOT treat crossing lines as character strokes unless they clearly belong to the letter shape.
@@ -447,6 +447,8 @@ import { ChatAnthropic } from "@langchain/anthropic";
                     console.log('[Popup] "입력완료" 버튼 클릭!');
                 } else {
                     console.error(`❌ [AI] 추출 실패 (글자수 불일치): [${captchaText}]`);
+                    captchaText = "AAAAAA"
+                    await popupPage.type('#label-for-captcha', captchaText);
                 }
 
             } catch (e) {
