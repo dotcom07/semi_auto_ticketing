@@ -1,12 +1,20 @@
-const puppeteer = require('puppeteer');
+import puppeteer from 'puppeteer';
+import "dotenv/config";
+import { ChatOpenAI } from "@langchain/openai";
+import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
+import { HumanMessage } from "@langchain/core/messages";
+import { ChatAnthropic } from "@langchain/anthropic";
 
 (async () => {
+
+    // 사용할 AI 모델 선택 ('openai' | 'gemini' | 'anthropic')
+    const OCR_PROVIDER = 'anthropic';
     // ============================================================
     // [설정 영역] 목표 날짜 설정
     // ============================================================
     const targetYear = 2026;
-    const targetMonth = 3; // 2월
-    const targetDay = 7;  // 21일
+    const targetMonth = 2; // 2월
+    const targetDay = 21;  // 21일
     // ============================================================
 
     console.log('🔄 Chrome 브라우저(포트 9222)에 연결 시도 중...');
@@ -266,6 +274,185 @@ const puppeteer = require('puppeteer');
             await new Promise(r => setTimeout(r, 150));
             await targetPage.mouse.up();
             console.log('🔥 [Node] 클릭 완료!');
+
+            
+            console.log('👀 [Node] 팝업창(onestop.htm) 열림 대기 중...');
+            // --------------------------------------------------------------------------------
+            // 📝 [프롬프트 전략 수정] JSON 포맷 강제
+            // --------------------------------------------------------------------------------
+            const OCR_PROMPT_PLAIN = `Extract the 6 uppercase English letters from the captcha image.
+            Ignore lines and noise. Focus on the shapes.
+            Distinguish 'O' vs 'Q' carefully (Q needs a clear tail).
+            Output ONLY the 6 letters. No other text.`;
+
+            const OCR_PROMPT_JSON = `You are a captcha solving machine.
+
+            Task:
+            Extract exactly 6 uppercase English letters (A–Z) from the image.
+
+            Noise handling rules (VERY IMPORTANT):
+            - Ignore any horizontal, diagonal, or vertical lines that are NOT part of the character itself.
+            - Overlaid lines, crossing lines, or background noise MUST be ignored completely.
+
+            Character distinction rules:
+            - O vs Q:
+            - Q ONLY if there is a clear internal tail that is part of the letter shape.
+            - If a line crosses the circle but is not an internal tail, it is O.
+
+            - I vs H:
+            - I is a single vertical stroke.
+            - If a horizontal line crosses near an I but does NOT connect two vertical strokes, it is still I.
+            - H ONLY if there are TWO distinct vertical strokes connected by a horizontal bar.
+
+            - E vs F:
+            - Both have a single vertical stroke.
+            - F has ONLY two horizontal bars (top and middle).
+            - E has THREE horizontal bars (top, middle, and bottom).
+            - The bottom horizontal bar counts ONLY if it is clearly connected to the vertical stroke.
+            - If a horizontal line appears near the bottom but is not connected, crosses other characters, or looks like noise, it MUST be ignored.
+            - In that case, classify the letter as F, not E.
+            
+
+            - Do NOT infer characters from noise.
+            - Do NOT treat crossing lines as character strokes unless they clearly belong to the letter shape.
+
+            Output rules (ABSOLUTE):
+            - Output ONLY a valid JSON object.
+            - Exactly this format: {"captcha":"ABCDEF"}
+            - Exactly 6 letters.
+            - Uppercase A–Z only.
+            - No explanation.
+            - No reasoning.
+            - No extra text.
+            - No markdown.
+            `;
+
+            // 텍스트 정제 함수
+            function normalizeCaptcha(text) {
+                return text.trim().toUpperCase().replace(/[^A-Z]/g, '');
+            }
+
+            // OpenAI (기존 유지)
+            async function solveCaptchaWithOpenAI(base64Image) {
+                const model = new ChatOpenAI({ modelName: "gpt-4o-mini", temperature: 0 });
+                const message = new HumanMessage({
+                    content: [
+                        { type: "text", text: OCR_PROMPT_PLAIN },
+                        { type: "image_url", image_url: { url: `data:image/png;base64,${base64Image}` } }
+                    ]
+                });
+                const response = await model.invoke([message]);
+                return normalizeCaptcha(response.content);
+            }
+
+            // Gemini (기존 유지)
+            async function solveCaptchaWithGemini(base64Image) {
+                if (!process.env.GOOGLE_API_KEY) throw new Error("GOOGLE_API_KEY not set");
+                const model = new ChatGoogleGenerativeAI({ model: "gemini-2.5-flash", temperature: 0 });
+                const message = new HumanMessage({
+                    content: [
+                        { type: "text", text: OCR_PROMPT_PLAIN },
+                        { type: "image_url", image_url: { url: `data:image/png;base64,${base64Image}` } }
+                    ]
+                });
+                const response = await model.invoke([message]);
+                return normalizeCaptcha(response.content);
+            }
+
+            // [Anthropic - Claude] ✨ 수정됨 ✨
+            // JSON 포맷을 강제하고 파싱하는 로직 추가
+            async function solveCaptchaWithAnthropic(base64Image) {
+                if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set");
+                
+                // OCR 성능: Sonnet 3.5 추천 (Haiku는 복잡한 Captcha에서 약할 수 있음)
+                const model = new ChatAnthropic({
+                    model: "claude-sonnet-4-5-20250929", 
+                    temperature: 0,
+                });
+
+                const message = new HumanMessage({
+                    content: [
+                        { type: "text", text: OCR_PROMPT_JSON }, // JSON 프롬프트 사용
+                        { type: "image_url", image_url: { url: `data:image/png;base64,${base64Image}` } }
+                    ]
+                });
+
+                const response = await model.invoke([message]);
+                const rawContent = response.content;
+                
+                console.log(`🔍 [Anthropic Raw]: ${rawContent}`); // 디버깅용 로그
+
+                try {
+                    // 1. JSON 추출 시도 (Markdown 코드 블록 제거 등)
+                    const jsonMatch = rawContent.match(/\{[\s\S]*?\}/);
+                    if (jsonMatch) {
+                        const jsonStr = jsonMatch[0];
+                        const parsed = JSON.parse(jsonStr);
+                        if (parsed.captcha) {
+                            return normalizeCaptcha(parsed.captcha);
+                        }
+                    }
+                    
+                    // 2. JSON 파싱 실패 시, 기존 방식대로 정규식 추출 시도 (fallback)
+                    console.log('⚠️ JSON 파싱 실패, 정규식 추출 시도');
+                    return normalizeCaptcha(rawContent);
+
+                } catch (err) {
+                    console.error('❌ Anthropic 응답 파싱 에러:', err);
+                    return normalizeCaptcha(rawContent);
+                }
+            }
+
+            async function waitForReservationPopup(browser) {
+                while (true) {
+                    const pages = await browser.pages();
+                    const popup = pages.find(p => p.url().includes("popup/onestop.htm"));
+                    if (popup) return popup;
+                    await new Promise(r => setTimeout(r, 300));
+                }
+            }
+
+            async function captureCaptchaBase64(popupPage) {
+                await popupPage.bringToFront();
+                const captchaEl = await popupPage.waitForSelector("#captchaImg", { visible: true, timeout: 10000 });
+                return await captchaEl.screenshot({ encoding: "base64" });
+            }
+
+            try {
+                const popupPage = await waitForReservationPopup(browser);
+                console.log(`✨ [Popup] 예매 팝업창 발견: ${popupPage.url()}`);
+
+                const captchaBase64 = await captureCaptchaBase64(popupPage);
+                console.log("📸 [Popup] 캡차 캡처 완료");
+
+                let captchaText = "";
+
+                if (OCR_PROVIDER === 'openai') {
+                    console.log("🤖 [AI] OpenAI OCR 요청");
+                    captchaText = await solveCaptchaWithOpenAI(captchaBase64);
+                } else if (OCR_PROVIDER === 'gemini') {
+                    console.log("🤖 [AI] Gemini OCR 요청");
+                    captchaText = await solveCaptchaWithGemini(captchaBase64);
+                } else if (OCR_PROVIDER === 'anthropic') {
+                    console.log("🤖 [AI] Anthropic(Claude) OCR 요청");
+                    captchaText = await solveCaptchaWithAnthropic(captchaBase64);
+                }
+
+                console.log(`🤖 [AI] 최종 추출 결과: ${captchaText}`);
+
+                if (captchaText && captchaText.length === 6) {
+                    await popupPage.type('#label-for-captcha', captchaText);
+                    console.log('[Popup] 캡차 텍스트 입력 완료');
+                    await popupPage.click('#btnComplete');
+                    console.log('[Popup] "입력완료" 버튼 클릭!');
+                } else {
+                    console.error(`❌ [AI] 추출 실패 (글자수 불일치): [${captchaText}]`);
+                }
+
+            } catch (e) {
+            console.error('❌ 팝업 처리 중 에러:', e);
+            }
+
         } else {
             console.error('❌ 버튼 좌표 계산 실패 (화면 밖 가능성)');
         }
