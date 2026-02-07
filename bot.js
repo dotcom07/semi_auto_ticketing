@@ -5,18 +5,118 @@ import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { HumanMessage } from "@langchain/core/messages";
 import { ChatAnthropic } from "@langchain/anthropic";
 
+// ============================================================
+// 1. GUI 설정 윈도우 실행 함수
+// ============================================================
+async function getUserConfig() {
+    console.log('🖥️ 설정 UI 윈도우를 띄웁니다...');
+    
+    // UI용 브라우저를 새로 엽니다 (기존 디버그 브라우저 아님)
+    const uiBrowser = await puppeteer.launch({
+        headless: false,
+        args: ['--window-size=500,600', '--app=data:text/html,'] // 앱 모드로 실행
+    });
+
+    const page = await uiBrowser.pages();
+    const uiPage = page[0];
+    await uiPage.setViewport({ width: 500, height: 600 });
+
+    // HTML UI 디자인
+    const htmlContent = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>멜론 티켓팅 봇 설정</title>
+        <style>
+            body { font-family: 'Apple SD Gothic Neo', sans-serif; padding: 20px; background-color: #f0f2f5; color: #333; }
+            h2 { text-align: center; color: #00cd3c; margin-bottom: 30px; }
+            .group { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 20px; }
+            label { display: block; margin-bottom: 8px; font-weight: bold; font-size: 14px; }
+            input, select { width: 100%; padding: 12px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; font-size: 16px; }
+            button { width: 100%; background-color: #00cd3c; color: white; padding: 15px; border: none; border-radius: 8px; font-size: 18px; font-weight: bold; cursor: pointer; transition: 0.3s; }
+            button:hover { background-color: #00b033; }
+            .info { font-size: 12px; color: #666; text-align: center; margin-top: 10px; }
+        </style>
+    </head>
+    <body>
+        <h2>🍈 Ticket Bot Settings</h2>
+        
+        <div class="group">
+            <label>🎯 목표 날짜 설정</label>
+            <div style="display:flex; gap:10px;">
+                <input type="number" id="year" value="2026" placeholder="년">
+                <input type="number" id="month" value="2" placeholder="월">
+                <input type="number" id="day" value="21" placeholder="일">
+            </div>
+        </div>
+
+        <div class="group">
+            <label>🤖 OCR AI 모델 선택</label>
+            <select id="provider">
+                <option value="anthropic" selected>Anthropic (Claude 3.5) - 추천✨</option>
+                <option value="openai">OpenAI (GPT-4o)</option>
+                <option value="gemini">Google (Gemini)</option>
+            </select>
+        </div>
+
+        <button onclick="submitConfig()">🚀 봇 가동 시작</button>
+        <p class="info">버튼을 누르면 이 창이 닫히고 봇이 실행됩니다.</p>
+
+        <script>
+            function submitConfig() {
+                const year = document.getElementById('year').value;
+                const month = document.getElementById('month').value;
+                const day = document.getElementById('day').value;
+                const provider = document.getElementById('provider').value;
+
+                if(!year || !month || !day) {
+                    alert('날짜를 모두 입력해주세요.');
+                    return;
+                }
+
+                // Node.js로 데이터 전송
+                window.sendToNode({ 
+                    targetYear: Number(year), 
+                    targetMonth: Number(month), 
+                    targetDay: Number(day), 
+                    OCR_PROVIDER: provider 
+                });
+            }
+        </script>
+    </body>
+    </html>
+    `;
+
+    await uiPage.setContent(htmlContent);
+
+    // 사용자가 버튼을 누를 때까지 대기하는 Promise 생성
+    const configPromise = new Promise((resolve) => {
+        // 브라우저 -> Node.js 통신 함수 노출
+        uiPage.exposeFunction('sendToNode', async (data) => {
+            await uiBrowser.close(); // UI 창 닫기
+            resolve(data); // 데이터 반환하며 Promise 완료
+        });
+    });
+
+    return configPromise;
+}
+
+// ============================================================
+// 2. 메인 실행부
+// ============================================================
 (async () => {
+    
+    // [UI 실행] 설정값을 받아옵니다.
+    const config = await getUserConfig();
 
-    // 사용할 AI 모델 선택 ('openai' | 'gemini' | 'anthropic')
-    const OCR_PROVIDER = 'anthropic';
-    // ============================================================
-    // [설정 영역] 목표 날짜 설정
-    // ============================================================
-    const targetYear = 2026;
-    const targetMonth = 2; // 2월
-    const targetDay = 21;  // 21일
-    // ============================================================
+    console.log('\n==========================================');
+    console.log(`✅ 설정 완료!`);
+    console.log(`📅 날짜: ${config.targetYear}년 ${config.targetMonth}월 ${config.targetDay}일`);
+    console.log(`🤖 모델: ${config.OCR_PROVIDER}`);
+    console.log('==========================================\n');
 
+    // 받아온 설정값 변수 할당
+    const { targetYear, targetMonth, targetDay, OCR_PROVIDER } = config;
     console.log('🔄 Chrome 브라우저(포트 9222)에 연결 시도 중...');
 
     let browser;
