@@ -541,13 +541,20 @@ async function runBotLogic(config) {
             
             await logToUI('👀 팝업창(onestop.htm) 열림 대기 중...');
 
-
             async function waitForReservationPopup(browser) {
-                while (true) {
+                let count = 0;
+                while (true) { 
                     const pages = await browser.pages();
                     const popup = pages.find(p => p.url().includes("popup/onestop.htm"));
                     if (popup) return popup;
-                    await new Promise(r => setTimeout(r, 300));
+                    
+                    // 5초마다 로그를 찍어서 봇이 살아있음을 알림
+                    if (count % 10 === 0) { // 0.5초 * 10 = 5초
+                        await logToUI(`⏳ 팝업 대기 중... - ${new Date().toLocaleTimeString()}`, 'info');
+                    }
+                    
+                    await sleep(500);
+                    count++;
                 }
             }
 
