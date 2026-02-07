@@ -4,110 +4,241 @@ import { ChatOpenAI } from "@langchain/openai";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { HumanMessage } from "@langchain/core/messages";
 import { ChatAnthropic } from "@langchain/anthropic";
+import { spawn } from 'child_process';
+import os from 'os';
+import path from 'path';
+
 
 // ============================================================
-// 1. GUI 설정 윈도우 실행 함수
+// 0. 크롬 자동 실행 함수 (배치 파일 대체)
 // ============================================================
-async function getUserConfig() {
-    console.log('🖥️ 설정 UI 윈도우를 띄웁니다...');
+async function launchChrome() {
+    console.log('🚀 시스템 감지 중...');
     
-    // UI용 브라우저를 새로 엽니다 (기존 디버그 브라우저 아님)
-    const uiBrowser = await puppeteer.launch({
-        headless: false,
-        args: ['--window-size=500,600', '--app=data:text/html,'] // 앱 모드로 실행
+    const platform = os.platform(); // 'win32' or 'darwin' (mac)
+    let chromePath = '';
+    let userDataDir = path.join(process.cwd(), 'ChromeDebug'); // 실행 파일과 같은 위치에 폴더 생성
+
+    if (platform === 'win32') {
+        // 윈도우 기본 경로
+        chromePath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+        // 만약 64비트 폴더에 없다면 32비트 폴더 체크 (필요시 추가)
+    } else if (platform === 'darwin') {
+        // 맥 기본 경로
+        chromePath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+    } else {
+        console.log('❌ 지원하지 않는 OS입니다.');
+        return;
+    }
+
+    console.log(`📂 유저 데이터 경로: ${userDataDir}`);
+    console.log(`🌐 크롬 실행 경로: ${chromePath}`);
+
+    // 크롬 실행 인자 (배치 파일 내용과 동일)
+    const args = [
+        '--remote-debugging-port=9222',
+        `--user-data-dir=${userDataDir}`,
+        '--disable-popup-blocking',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--window-size=1280,1024' // (선택) 창 크기 지정
+        // 'ticket.melon.com' // (선택) 시작하자마자 멜론 띄우기
+    ];
+
+    // 프로세스 실행 (detached: true로 독립 실행)
+    const chromeProcess = spawn(chromePath, args, {
+        detached: true,
+        stdio: 'ignore' 
     });
 
-    const page = await uiBrowser.pages();
-    const uiPage = page[0];
-    await uiPage.setViewport({ width: 500, height: 600 });
+    chromeProcess.unref(); // 봇이 꺼져도 크롬은 켜져있게 하려면 사용
 
-    // HTML UI 디자인
+    console.log('✅ 크롬이 실행되었습니다. (2초 대기...)');
+    
+    // 크롬이 완전히 켜질 때까지 3초 정도 기다려 줍니다.
+    await new Promise(resolve => setTimeout(resolve, 2000));
+}
+
+let uiPage = null;
+
+// ============================================================
+// [핵심] 로그를 UI와 터미널 양쪽에 출력하는 함수
+// ============================================================
+async function logToUI(message, type = 'info') {
+    const timestamp = new Date().toLocaleTimeString();
+    const cleanMsg = message.replace(/%c/g, ''); 
+    
+    if (type === 'error') console.error(`[${timestamp}] ❌ ${cleanMsg}`);
+    else if (type === 'success') console.log(`[${timestamp}] ✅ ${cleanMsg}`);
+    else console.log(`[${timestamp}] ℹ️ ${cleanMsg}`);
+
+    if (uiPage && !uiPage.isClosed()) {
+        try {
+            // 여기는 단순한 데이터 전달이므로 에러가 나지 않음
+            await uiPage.evaluate((msg, type, time) => {
+                if (window.addLog) window.addLog(msg, type, time);
+            }, cleanMsg, type, timestamp);
+        } catch (e) { }
+    }
+}
+
+// ============================================================
+// 1. GUI 설정 윈도우 실행 함수 (스크립트 주입 방식 - 연결 확실함)
+// ============================================================
+async function launchGUI() {
+    console.log('🖥️ 설정 UI 윈도우를 띄웁니다...');
+    
+    const platform = os.platform();
+    let execPath = '';
+    if (platform === 'darwin') {
+        execPath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+    } else if (platform === 'win32') {
+        execPath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+    }
+
+    const uiBrowser = await puppeteer.launch({
+        headless: false,
+        executablePath: execPath,
+        args: [
+            '--window-size=500,800', 
+            '--app=data:text/html,', 
+            '--no-first-run',
+            '--no-default-browser-check'
+        ] 
+    });
+
+    const pages = await uiBrowser.pages();
+    uiPage = pages[0];
+    await uiPage.setViewport({ width: 500, height: 800 });
+
+    // 1. Node.js 연결 함수 미리 정의
+    await uiPage.exposeFunction('startNodeLogic', (data) => {
+        uiResolve(data);
+    });
+
+    let uiResolve;
+    const logicPromise = new Promise((resolve) => { uiResolve = resolve; });
+
+    // 2. HTML (스크립트 태그 없음 - 순수 디자인만)
     const htmlContent = `
     <!DOCTYPE html>
     <html>
     <head>
-        <title>멜론 티켓팅 봇 설정</title>
+        <title>🍈 멜론 티켓팅 봇</title>
+        <meta charset="utf-8">
         <style>
-            body { font-family: 'Apple SD Gothic Neo', sans-serif; padding: 20px; background-color: #f0f2f5; color: #333; }
-            h2 { text-align: center; color: #00cd3c; margin-bottom: 30px; }
-            .group { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 20px; }
-            label { display: block; margin-bottom: 8px; font-weight: bold; font-size: 14px; }
-            input, select { width: 100%; padding: 12px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; font-size: 16px; }
+            body { font-family: sans-serif; padding: 20px; background-color: #f0f2f5; color: #333; }
+            h2 { text-align: center; color: #00cd3c; margin: 10px 0 20px 0; }
+            .group { background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 15px; }
+            label { display: block; margin-bottom: 5px; font-weight: bold; font-size: 14px; }
+            input, select { width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
             button { width: 100%; background-color: #00cd3c; color: white; padding: 15px; border: none; border-radius: 8px; font-size: 18px; font-weight: bold; cursor: pointer; transition: 0.3s; }
             button:hover { background-color: #00b033; }
-            .info { font-size: 12px; color: #666; text-align: center; margin-top: 10px; }
+            button:disabled { background-color: #ccc; cursor: not-allowed; }
+            #log-container {
+                background-color: #1e1e1e; color: #00ff00; padding: 15px; border-radius: 12px;
+                height: 300px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 12px;
+                box-shadow: inset 0 0 10px rgba(0,0,0,0.5);
+            }
+            .log-entry { margin-bottom: 5px; border-bottom: 1px solid #333; padding-bottom: 2px; }
+            .log-time { color: #888; margin-right: 5px; }
+            .log-success { color: #00ff00; font-weight: bold; }
+            .log-error { color: #ff4444; font-weight: bold; }
+            .log-warn { color: #ffbb00; }
         </style>
     </head>
     <body>
-        <h2>🍈 Ticket Bot Settings</h2>
+        <h2>🍈 Ticket Bot Controller</h2>
         
         <div class="group">
-            <label>🎯 목표 날짜 설정</label>
-            <div style="display:flex; gap:10px;">
+            <label>📅 목표 날짜</label>
+            <div style="display:flex; gap:5px;">
                 <input type="number" id="year" value="2026" placeholder="년">
                 <input type="number" id="month" value="2" placeholder="월">
                 <input type="number" id="day" value="21" placeholder="일">
             </div>
-        </div>
 
-        <div class="group">
-            <label>🤖 OCR AI 모델 선택</label>
+            <label>🤖 AI 모델</label>
             <select id="provider">
-                <option value="anthropic" selected>Anthropic (Claude 3.5) - 추천✨</option>
+                <option value="anthropic" selected>Anthropic (Claude 3.5)</option>
                 <option value="openai">OpenAI (GPT-4o)</option>
                 <option value="gemini">Google (Gemini)</option>
             </select>
+            
+            <button id="startBtn">🚀 봇 가동 시작</button>
         </div>
 
-        <button onclick="submitConfig()">🚀 봇 가동 시작</button>
-        <p class="info">버튼을 누르면 이 창이 닫히고 봇이 실행됩니다.</p>
+        <label>📜 진행 로그</label>
+        <div id="log-container">
+            <div class="log-entry"><span class="log-time">System</span> 대기 중...</div>
+        </div>
+    </body>
+    </html>
+    `;
 
-        <script>
-            function submitConfig() {
-                const year = document.getElementById('year').value;
-                const month = document.getElementById('month').value;
-                const day = document.getElementById('day').value;
-                const provider = document.getElementById('provider').value;
+    // 3. HTML 로드 (Base64 방식)
+    const base64HTML = Buffer.from(htmlContent).toString('base64');
+    await uiPage.goto(`data:text/html;base64,${base64HTML}`);
 
-                if(!year || !month || !day) {
-                    alert('날짜를 모두 입력해주세요.');
-                    return;
-                }
+    // 4. 자바스크립트 로직 별도 주입 (이 방식이 가장 안전함)
+    // 문자열로 정의하여 번들러(esbuild) 간섭을 피함
+    const clientScript = `
+        window.addLog = function(msg, type, time) {
+            const container = document.getElementById('log-container');
+            const div = document.createElement('div');
+            div.className = 'log-entry';
+            let typeClass = 'log-info';
+            if(type === 'success') typeClass = 'log-success';
+            else if(type === 'error') typeClass = 'log-error';
+            else if(type === 'warn') typeClass = 'log-warn';
+            div.innerHTML = '<span class="log-time">[' + time + ']</span> <span class="' + typeClass + '">' + msg + '</span>';
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+        };
 
-                // Node.js로 데이터 전송
-                window.sendToNode({ 
+        document.getElementById('startBtn').onclick = function() {
+            const year = document.getElementById('year').value;
+            const month = document.getElementById('month').value;
+            const day = document.getElementById('day').value;
+            const provider = document.getElementById('provider').value;
+
+            if(!year || !month || !day) {
+                alert('날짜를 확인해주세요.');
+                return;
+            }
+
+            this.disabled = true;
+            this.innerText = '가동 중...';
+            const inputs = document.querySelectorAll('input, select');
+            for (let i = 0; i < inputs.length; i++) inputs[i].disabled = true;
+
+            // 여기서 Node.js 함수 호출
+            if (window.startNodeLogic) {
+                window.startNodeLogic({ 
                     targetYear: Number(year), 
                     targetMonth: Number(month), 
                     targetDay: Number(day), 
                     OCR_PROVIDER: provider 
                 });
+            } else {
+                alert('연결 오류: Node.js 브릿지가 아직 준비되지 않았습니다.');
             }
-        </script>
-    </body>
-    </html>
+        };
     `;
 
-    await uiPage.setContent(htmlContent);
+    // 스크립트를 브라우저에 강제 주입
+    await uiPage.addScriptTag({ content: clientScript });
 
-    // 사용자가 버튼을 누를 때까지 대기하는 Promise 생성
-    const configPromise = new Promise((resolve) => {
-        // 브라우저 -> Node.js 통신 함수 노출
-        uiPage.exposeFunction('sendToNode', async (data) => {
-            await uiBrowser.close(); // UI 창 닫기
-            resolve(data); // 데이터 반환하며 Promise 완료
-        });
-    });
-
-    return configPromise;
+    return logicPromise;
 }
-
 // ============================================================
 // 2. 메인 실행부
 // ============================================================
 (async () => {
-    
+
+    await launchChrome();
     // [UI 실행] 설정값을 받아옵니다.
-    const config = await getUserConfig();
+    const config = await launchGUI();
 
     console.log('\n==========================================');
     console.log(`✅ 설정 완료!`);
@@ -118,7 +249,7 @@ async function getUserConfig() {
     // 받아온 설정값 변수 할당
     const { targetYear, targetMonth, targetDay, OCR_PROVIDER } = config;
     console.log('🔄 Chrome 브라우저(포트 9222)에 연결 시도 중...');
-
+    
     let browser;
     try {
         browser = await puppeteer.connect({
@@ -126,17 +257,17 @@ async function getUserConfig() {
             defaultViewport: null // 기존 창 크기 사용
         });
     } catch (e) {
-        console.error('❌ Chrome 연결 실패. 터미널에서 크롬이 디버그 모드로 실행 중인지 확인하세요.');
+        await logToUI('❌ Chrome 연결 실패! 디버그 모드로 실행되었는지 확인하세요.', 'error');
         return;
     }
 
-    console.log('✅ Chrome 연결 성공!');
+    await logToUI('✅ Chrome 연결 성공!', 'success');
 
     const pages = await browser.pages();
     const targetPage = pages.find(p => p.url().includes('ticket.melon.com'));
 
     if (!targetPage) {
-        console.error('❌ 멜론 티켓 페이지를 찾을 수 없습니다.');
+        await logToUI('❌ 멜론 티켓 페이지를 찾을 수 없습니다.', 'error');
         browser.disconnect();
         return;
     }
@@ -144,7 +275,7 @@ async function getUserConfig() {
     // [선택사항] 뷰포트 크기 강제 설정 (화면이 작아 버튼이 안 보이는 경우 대비)
     // await targetPage.setViewport({ width: 1920, height: 1080 });
 
-    console.log(`🎯 타겟 페이지 발견: ${targetPage.url()}`);
+    await logToUI(`타겟 페이지 발견: ${targetPage.url()}`);
 
     // 알럿 창 자동 닫기 (이게 뜨면 봇이 멈출 수 있으므로 필수)
     targetPage.on('dialog', async dialog => {
@@ -153,14 +284,12 @@ async function getUserConfig() {
 
     // 상세 로그 출력
     targetPage.on('console', msg => {
-        const text = msg.text().replace(/%c/g, '').replace(/\[.*?\]/g, '').trim();
-        if (text.includes('INFO')) console.log(`[INFO] ${text}`);
-        else if (text.includes('SUCCESS')) console.log(`\x1b[32m[SUCCESS] ${text}\x1b[0m`);
-        else if (text.includes('RETRY')) console.log(`\x1b[33m[RETRY] ${text}\x1b[0m`);
-        else if (text.includes('CLICK')) console.log(`\x1b[35m[ACTION] ${text}\x1b[0m`);
-        else if (text.includes('ERROR')) console.log(`\x1b[31m[ERROR] ${text}\x1b[0m`);
-        else console.log(`[BROWSER] ${text}`); // 기타 로그도 출력
-    });
+            const text = msg.text().replace(/%c/g, '').replace(/\[.*?\]/g, '').trim();
+            if (text.includes('SUCCESS')) logToUI(text, 'success');
+            else if (text.includes('ERROR')) logToUI(text, 'error');
+            else if (text.includes('ACTION')) logToUI(text, 'warn');
+            else logToUI(text, 'info');
+        });
 
     // ============================================================
     // STEP 1: 브라우저 내부 로직 주입
@@ -347,7 +476,7 @@ async function getUserConfig() {
     // ============================================================
     // STEP 2: Puppeteer 물리 클릭 (스크롤 자동 이동 포함)
     // ============================================================
-    console.log('👀 [Node] 최종 클릭 대기 중...');
+    await logToUI('👀 최종 클릭 대기 중...');
     const finalBtnSelector = '#ticketReservation_Btn.btColorGreen';
     
     try {
@@ -373,10 +502,10 @@ async function getUserConfig() {
             await targetPage.mouse.down();
             await new Promise(r => setTimeout(r, 150));
             await targetPage.mouse.up();
-            console.log('🔥 [Node] 클릭 완료!');
+            await logToUI('🔥 예매 버튼 물리 클릭 완료!', 'warn');
 
             
-            console.log('👀 [Node] 팝업창(onestop.htm) 열림 대기 중...');
+            await logToUI('👀 팝업창(onestop.htm) 열림 대기 중...');
             // --------------------------------------------------------------------------------
             // 📝 [프롬프트 전략 수정] JSON 포맷 강제
             // --------------------------------------------------------------------------------
@@ -518,48 +647,73 @@ async function getUserConfig() {
                 return await captchaEl.screenshot({ encoding: "base64" });
             }
 
+            async function isCaptchaError(popupPage) {
+                return await popupPage.evaluate(() => {
+                    const errorEl = document.querySelector('#errorMessage');
+                    if (!errorEl) return false;
+
+                    // 화면에 실제로 보이는지 확인
+                    const isVisible = errorEl.offsetParent !== null;
+                    const hasText = errorEl.innerText.includes('문자를 정확히');
+
+                    return isVisible && hasText;
+                });
+            }
+
             try {
                 const popupPage = await waitForReservationPopup(browser);
-                console.log(`✨ [Popup] 예매 팝업창 발견: ${popupPage.url()}`);
+                await logToUI(`✨ 예매 팝업창 발견: ${popupPage.url()}`, 'success');
 
                 const captchaBase64 = await captureCaptchaBase64(popupPage);
-                console.log("📸 [Popup] 캡차 캡처 완료");
+                await logToUI("📸 캡차 이미지 캡처 완료", 'info');
 
                 let captchaText = "";
 
                 if (OCR_PROVIDER === 'openai') {
-                    console.log("🤖 [AI] OpenAI OCR 요청");
+                    await logToUI("🤖 [AI] OpenAI 분석 중...", 'info');
                     captchaText = await solveCaptchaWithOpenAI(captchaBase64);
                 } else if (OCR_PROVIDER === 'gemini') {
-                    console.log("🤖 [AI] Gemini OCR 요청");
+                    await logToUI("🤖 [AI] Gemini 분석 중...", 'info');
                     captchaText = await solveCaptchaWithGemini(captchaBase64);
                 } else if (OCR_PROVIDER === 'anthropic') {
-                    console.log("🤖 [AI] Anthropic(Claude) OCR 요청");
+                    await logToUI("🤖 [AI] Claude 분석 중...", 'info');
                     captchaText = await solveCaptchaWithAnthropic(captchaBase64);
                 }
 
-                console.log(`🤖 [AI] 최종 추출 결과: ${captchaText}`);
+                await logToUI(`🤖 분석 결과: [${captchaText}]`, 'warn');
 
                 if (captchaText && captchaText.length === 6) {
                     await popupPage.type('#label-for-captcha', captchaText);
-                    console.log('[Popup] 캡차 텍스트 입력 완료');
                     await popupPage.click('#btnComplete');
-                    console.log('[Popup] "입력완료" 버튼 클릭!');
+                    await logToUI("✅ 입력 및 제출 완료!", 'success');
+
+                    await new Promise(r => setTimeout(r, 100));
+
+                    const hasError = await isCaptchaError(popupPage);
+
+                    if (hasError) {
+                        await logToUI("❌ 캡차 오류: 문자를 정확히 입력해 주세요", "error");
+                        // 여기서 재시도 로직으로 이동
+                    } else {
+                        await logToUI("✅ 캡차 통과!", "success");
+                        // 다음 단계 진행
+                    }
+                
                 } else {
-                    console.error(`❌ [AI] 추출 실패 (글자수 불일치): [${captchaText}]`);
+                    await logToUI(`❌ 글자수 오류 (${captchaText.length}자). AAAAAA 입력 시도.`, 'error');
                     captchaText = "AAAAAA"
                     await popupPage.type('#label-for-captcha', captchaText);
                 }
 
             } catch (e) {
-            console.error('❌ 팝업 처리 중 에러:', e);
+            await logToUI(`❌ 팝업 에러: ${e.message}`, 'error');
             }
 
         } else {
-            console.error('❌ 버튼 좌표 계산 실패 (화면 밖 가능성)');
+            await logToUI('❌ 버튼 좌표 계산 실패', 'error');
         }
     } catch (e) {
-        console.error('❌ 클릭 중 에러:', e);
+        await logToUI(`❌ 실행 중 에러: ${e.message}`, 'error');
     }
     console.log('✅ 봇 동작 완료.');
 })();
