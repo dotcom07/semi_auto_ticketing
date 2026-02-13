@@ -534,7 +534,7 @@ async function runBotLogic(config) {
             console.log(`🖱️ [Node] 이동 -> (${x}, ${y})`);
             await targetPage.mouse.move(x, y);
             await targetPage.mouse.down();
-            await new Promise(r => setTimeout(r, 150));
+            await new Promise(r => setTimeout(r, 50));
             await targetPage.mouse.up();
             await logToUI('🔥 예매 버튼 물리 클릭 완료!', 'warn');
 
